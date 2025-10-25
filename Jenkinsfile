@@ -6,6 +6,7 @@ pipeline {
         PIP_CACHE_DIR = '~/.cache/pip'
         VENV_DIR = 'venv'
         DEPLOY_DIR = '/var/www/book-management'  // target deploy directory
+        APP_PORT = '8181'
     }
 
     options {
@@ -91,22 +92,20 @@ pipeline {
         }
 
         // 🚀 Deployment Stage
-            stage('Deploy') {
-                steps {
-                    script {
-                        echo '🚀 Starting deployment...'
-            
-                        sh """
-                            mkdir -p ${DEPLOY_DIR}
-                            rsync -av --exclude='${VENV_DIR}' --exclude='.git' ./ ${DEPLOY_DIR}/
-            
-                            cd ${DEPLOY_DIR}
-                            . ${VENV_DIR}/bin/activate || python3 -m venv ${VENV_DIR}
-                            pkill -f 'uvicorn' || true
-                            nohup ${VENV_DIR}/bin/uvicorn main:app --host 0.0.0.0 --port 8000 > app.log 2>&1 &
-                        """
-            
-                        echo "✅ Deployment completed successfully at ${DEPLOY_DIR}!"
+         stages {
+                stage('Deploy on 8181') {
+                    steps {
+                        sh '''
+                            cd /var/jenkins_home/workspace/book-management
+                            python3 -m venv venv
+                            . venv/bin/activate
+                            pip install fastapi uvicorn
+                            
+                            pkill -f "uvicorn main:app" || true
+                            nohup python -m uvicorn main:app --host 0.0.0.0 --port ${APP_PORT} > app.log 2>&1 &
+                            
+                            echo "✅ Try: http://143.1.1.128:${APP_PORT}/"
+                        '''
                     }
                 }
             }
