@@ -91,30 +91,28 @@ pipeline {
         }
 
         // 🚀 Deployment Stage
-        stage('Deploy') {
-            steps {
-                script {
-                    echo '🚀 Starting deployment...'
+stage('Deploy') {
+    steps {
+        script {
+            echo '🚀 Starting deployment...'
 
-                    sh """
-                        # Create deploy directory if not exists
-                        sudo mkdir -p ${DEPLOY_DIR}
+            sh """
+                mkdir -p ${DEPLOY_DIR}
 
-                        # Copy project files to deployment directory
-                        sudo rsync -av --exclude='${VENV_DIR}' --exclude='.git' ./ ${DEPLOY_DIR}/
+                rsync -av --exclude='${VENV_DIR}' --exclude='.git' ./ ${DEPLOY_DIR}/
 
-                        cd ${DEPLOY_DIR}
-                        . ${VENV_DIR}/bin/activate
+                cd ${DEPLOY_DIR}
+                . ${VENV_DIR}/bin/activate || python3 -m venv ${VENV_DIR}
 
-                        # Optionally restart a service (e.g., Gunicorn, FastAPI, etc.)
-                        echo "🔁 Restarting application service..."
-                        sudo systemctl restart book-management || echo "⚠️ Service not configured yet"
-                    """
+                echo "🔁 Restarting application (if running locally)..."
+                pkill -f 'uvicorn' || true
+                nohup ${VENV_DIR}/bin/uvicorn main:app --host 0.0.0.0 --port 8000 > app.log 2>&1 &
+            """
 
-                    echo "✅ Deployment completed successfully!"
-                }
-            }
+            echo "✅ Deployment completed successfully!"
         }
+    }
+}
     }
 
     post {
