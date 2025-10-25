@@ -5,7 +5,7 @@ pipeline {
         PYTHON_VERSION = '3.11'
         PIP_CACHE_DIR = '~/.cache/pip'
         VENV_DIR = 'venv'
-        NODE_VERSION = '18.x'
+       
     }
 
     options {
@@ -92,9 +92,6 @@ pipeline {
                     pip install -r requirements.txt
                 """
 
-                nodejs(nodeJSInstallationName: 'NodeJS 18.x') {
-                    sh 'npm ci'
-                }
             }
         }
 
