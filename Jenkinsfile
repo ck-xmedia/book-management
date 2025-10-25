@@ -92,22 +92,28 @@ pipeline {
         }
 
         
-    stage('Deploy on 8181') {
-        steps {
-            sh '''
-                cd /var/jenkins_home/workspace/book-management
-                python3 -m venv venv
-                . venv/bin/activate
-                pip install fastapi uvicorn
-                
-                pkill -f "uvicorn main:app" || true
-                nohup python -m uvicorn main:app --host 0.0.0.0 --port ${APP_PORT} > app.log 2>&1 &
-                
-                echo "✅ Try: http://143.1.1.128:${APP_PORT}/"
-            '''
-        }
-    }
-          
+        stage('Deploy on 8181') {
+        
+            steps {
+                sh '''
+                    cd ${WORKSPACE}
+                    echo "📂 Current Directory: $(pwd)"
+        
+                    python3 -m venv venv
+                    . venv/bin/activate
+                    pip install --upgrade pip
+                    pip install fastapi uvicorn
+        
+                    echo "🛑 Stopping existing app (if running)..."
+                    pkill -f "uvicorn main:app" || true
+        
+                    echo "🚀 Starting app on port ${APP_PORT}..."
+                    nohup python -m uvicorn main:app --host 0.0.0.0 --port ${APP_PORT} > app.log 2>&1 &
+        
+                    echo "✅ Try: http://143.1.1.128:${APP_PORT}/"
+                '''
+            }
+        } 
     }
 
     post {
