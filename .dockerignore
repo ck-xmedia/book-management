@@ -1,0 +1,15 @@
+.git
+.gitignore
+.github/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.swp
+.pytest_cache/
+.venv/
+htmlcov/
+/tests/
+/scripts/
+README.md
+.env

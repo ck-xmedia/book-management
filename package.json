@@ -1,0 +1,10 @@
+{
+  "name": "json-books",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Aux scripts for FastAPI JSON Books project",
+  "scripts": {
+    "docker:build": "docker build -t json-books:latest .",
+    "docker:run": "docker run -p 8080:8080 -v $(pwd)/data:/app/data json-books:latest"
+  }
+}
