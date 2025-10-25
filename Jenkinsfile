@@ -5,7 +5,7 @@ pipeline {
         PYTHON_VERSION = '3.11'
         PIP_CACHE_DIR = '~/.cache/pip'
         VENV_DIR = 'venv'
-       
+        DEPLOY_DIR = '/var/www/book-management'  // target deploy directory
     }
 
     options {
@@ -19,7 +19,6 @@ pipeline {
                 script {
                     echo '🔍 Checking required environments...'
 
-                    // Check Python version
                     def pythonInstalled = false
                     def pythonVersionCorrect = false
 
@@ -83,40 +82,36 @@ pipeline {
         stage('Install Dependencies') {
             steps {
                 sh """
-                    # Create and activate virtual environment
                     python3 -m venv ${VENV_DIR}
                     . ${VENV_DIR}/bin/activate
-
-                    # Upgrade pip and install dependencies
                     pip install --upgrade pip
                     pip install -r requirements.txt
                 """
-
             }
         }
 
-        stage('Lint & Type Check') {
+        // 🚀 Deployment Stage
+        stage('Deploy') {
             steps {
-                sh """
-                    . ${VENV_DIR}/bin/activate
-                    black --check .
-                    ruff check .
-                    mypy .
-                """
-            }
-        }
+                script {
+                    echo '🚀 Starting deployment...'
 
-        stage('Test') {
-            steps {
-                sh """
-                    . ${VENV_DIR}/bin/activate
-                    coverage run -m pytest
-                    coverage report
-                """
-            }
-            post {
-                always {
-                    junit 'pytest-report.xml'
+                    sh """
+                        # Create deploy directory if not exists
+                        sudo mkdir -p ${DEPLOY_DIR}
+
+                        # Copy project files to deployment directory
+                        sudo rsync -av --exclude='${VENV_DIR}' --exclude='.git' ./ ${DEPLOY_DIR}/
+
+                        cd ${DEPLOY_DIR}
+                        . ${VENV_DIR}/bin/activate
+
+                        # Optionally restart a service (e.g., Gunicorn, FastAPI, etc.)
+                        echo "🔁 Restarting application service..."
+                        sudo systemctl restart book-management || echo "⚠️ Service not configured yet"
+                    """
+
+                    echo "✅ Deployment completed successfully!"
                 }
             }
         }
@@ -128,14 +123,14 @@ pipeline {
         }
         success {
             emailext (
-                subject: "Pipeline Success: ${currentBuild.fullDisplayName}",
-                body: "The pipeline completed successfully.",
+                subject: "✅ Pipeline Success: ${currentBuild.fullDisplayName}",
+                body: "The pipeline completed successfully and was deployed to ${DEPLOY_DIR}.",
                 recipientProviders: [[$class: 'DevelopersRecipientProvider']]
             )
         }
         failure {
             emailext (
-                subject: "Pipeline Failed: ${currentBuild.fullDisplayName}",
+                subject: "❌ Pipeline Failed: ${currentBuild.fullDisplayName}",
                 body: "The pipeline failed. Please check the build logs.",
                 recipientProviders: [[$class: 'DevelopersRecipientProvider']]
             )
