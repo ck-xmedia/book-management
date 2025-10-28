@@ -1,6 +1,11 @@
 pipeline {
     agent any
 
+    environment {
+        BUILD_DIR = 'build'
+        ARTIFACTS_DIR = 'artifacts'
+    }
+
     stages {
         stage('Checkout') {
             steps {
@@ -8,19 +13,27 @@ pipeline {
             }
         }
 
+        stage('Install Dependencies') {
+            steps {
+                sh 'npm install'
+            }
+        }
+
         stage('Build') {
             steps {
-                script {
-                    // Detected languages: JavaScript/TypeScript, Python
-                    sh 'npm install && npm run build'
-                }
+                sh 'npm run build'
             }
         }
 
         stage('Test') {
             steps {
-                echo 'Running tests...'
-                // Add your test commands here
+                sh 'npm test'
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                echo 'Deploying application...'
             }
         }
     }
@@ -31,6 +44,9 @@ pipeline {
         }
         failure {
             echo 'Pipeline failed!'
+        }
+        always {
+            cleanWs()
         }
     }
 }
