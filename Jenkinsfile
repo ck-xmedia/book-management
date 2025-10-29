@@ -1,11 +1,6 @@
 pipeline {
     agent any
 
-    environment {
-        BUILD_DIR = 'build'
-        ARTIFACTS_DIR = 'artifacts'
-    }
-
     stages {
         stage('Checkout') {
             steps {
@@ -13,38 +8,32 @@ pipeline {
             }
         }
 
-        stage('Install Dependencies') {
+        stage('Install') {
             steps {
-                sh 'npm install'
+                sh 'pip3 install -r requirements.txt'
             }
         }
 
         stage('Build') {
             steps {
-                sh 'npm run build'
+                sh 'python3 -m compileall .'
             }
         }
 
         stage('Test') {
             steps {
-                sh 'npm test'
+                sh 'pytest'
             }
         }
 
         stage('Deploy') {
             steps {
-                echo 'Deploying application...'
+                echo 'Deploying...'
             }
         }
     }
 
     post {
-        success {
-            echo 'Pipeline completed successfully!'
-        }
-        failure {
-            echo 'Pipeline failed!'
-        }
         always {
             cleanWs()
         }
