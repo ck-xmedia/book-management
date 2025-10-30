@@ -165,7 +165,7 @@ pipeline {
         script {
           sh '''
             set -Eeuo pipefail
-            trap 'echo "[ERROR] Deployment failed" | tee -a logs/deploy.log' ERR
+            trap 'status=$?; if [ "$status" -ne 0 ]; then echo "[ERROR] Deployment failed" | tee -a logs/deploy.log; fi' EXIT
 
             APP_PORT="${APP_PORT:-8080}"
             mkdir -p logs
