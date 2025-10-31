@@ -84,34 +84,54 @@ pipeline {
 
               echo "Killing existing process (PID file) if present..."
               if [ -f "${PID_FILE}" ]; then
-                if kill -0 "$(cat ${PID_FILE})" >/dev/null 2>&1; then
-                  kill -9 "$(cat ${PID_FILE})" || true
+                if kill -0 "$(cat "${PID_FILE}")" >/dev/null 2>&1; then
+                  kill -9 "$(cat "${PID_FILE}")" >/dev/null 2>&1 || true
                 fi
-                rm -f "${PID_FILE}"
+                rm -f "${PID_FILE}" || true
               fi
 
-              echo "Freeing port ${APP_PORT}..."
-              if command -v ss >/dev/null 2>&1; then
-                PIDS="$(ss -ltnp 2>/dev/null | grep -E '[:\\.]'"${APP_PORT}"'\\b' | sed -n 's/.*pid=\\([0-9]\\+\\).*/\\1/p' | sort -u | tr '\\n' ' ')"
-                [ -n "${PIDS}" ] && kill -9 ${PIDS} || true
-              elif command -v fuser >/dev/null 2>&1; then
-                fuser -k "${APP_PORT}/tcp" || true
-              elif command -v lsof >/dev/null 2>&1; then
-                lsof -ti :"${APP_PORT}" | xargs -r kill -9 || true
-              elif command -v netstat >/dev/null 2>&1; then
-                PID=$(netstat -tulpn 2>/dev/null | awk '/:'"${APP_PORT}"'\\b/ {print $7}' | cut -d/ -f1 | head -n1); [ -n "$PID" ] && kill -9 "$PID" || true
+              RUNTIME_PORT="${APP_PORT}"
+              echo "Checking if port ${APP_PORT} is available..."
+              if ! "${PYTHON_BIN}" - <<'PY'
+import os, socket, sys
+port = int(os.environ.get("APP_PORT","8080"))
+s = socket.socket()
+try:
+    s.bind(("0.0.0.0", port))
+except OSError:
+    sys.exit(1)
+finally:
+    try: s.close()
+    except: pass
+PY
+              then
+                echo "Port ${APP_PORT} is in use; selecting an alternative port."
+                RUNTIME_PORT="$("${PYTHON_BIN}" - <<'PY'
+import socket
+s = socket.socket()
+s.bind(('127.0.0.1', 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)"
+                echo "Selected runtime port: ${RUNTIME_PORT}"
               else
-                pkill -f "uvicorn.*${APP_PORT}" || true
+                echo "Port ${APP_PORT} is free."
               fi
-              sleep 1
 
-              echo "Starting FastAPI (uvicorn) in background on port ${APP_PORT}..."
+              # Update runtime env info
+              {
+                echo "APP_PORT=${APP_PORT}"
+                echo "RUNTIME_PORT=${RUNTIME_PORT}"
+              } > .env.runtime || true
+
+              echo "Starting FastAPI (uvicorn) in background on port ${RUNTIME_PORT}..."
               mkdir -p "${LOG_DIR}"
-              nohup "${PYTHON_BIN}" -m uvicorn "${APP_ENTRY}" --host 0.0.0.0 --port "${APP_PORT}" --workers 1 > "${LOG_DIR}/app.out" 2> "${LOG_DIR}/app.err" &
+              nohup "${PYTHON_BIN}" -m uvicorn "${APP_ENTRY}" --host 0.0.0.0 --port "${RUNTIME_PORT}" --workers 1 > "${LOG_DIR}/app.out" 2> "${LOG_DIR}/app.err" &
               echo $! > "${PID_FILE}"
 
               sleep 2
-              if ! kill -0 "$(cat ${PID_FILE})" >/dev/null 2>&1; then
+              if ! kill -0 "$(cat "${PID_FILE}")" >/dev/null 2>&1; then
                 echo "Application failed to start. Last logs:"
                 tail -n 200 "${LOG_DIR}/app.err" || true
                 exit 1
@@ -122,11 +142,11 @@ pipeline {
               ok=0
               for i in $(seq 1 30); do
                 if command -v curl >/dev/null 2>&1; then
-                  curl -sf "http://127.0.0.1:${APP_PORT}/healthz" >/dev/null && ok=1 && break
+                  curl -sf "http://127.0.0.1:${RUNTIME_PORT}/healthz" >/dev/null && ok=1 && break
                 elif command -v wget >/dev/null 2>&1; then
-                  wget -qO- "http://127.0.0.1:${APP_PORT}/healthz" >/dev/null && ok=1 && break
+                  wget -qO- "http://127.0.0.1:${RUNTIME_PORT}/healthz" >/dev/null && ok=1 && break
                 else
-                  (echo > /dev/tcp/127.0.0.1/${APP_PORT}) >/dev/null 2>&1 && ok=1 && break
+                  (echo > /dev/tcp/127.0.0.1/${RUNTIME_PORT}) >/dev/null 2>&1 && ok=1 && break
                 fi
                 sleep 1
               done
@@ -138,17 +158,19 @@ pipeline {
                 exit 1
               fi
 
-              echo "Deployment successful and healthy on port ${APP_PORT}."
+              echo "Deployment successful and healthy on port ${RUNTIME_PORT}."
             '''
           } else if (ptype == 'node') {
             sh '''
               set -euxo pipefail
 
-              echo "Freeing port ${APP_PORT}..."
-              if command -v fuser >/dev/null 2>&1; then
-                fuser -k "${APP_PORT}/tcp" || true
-              elif command -v lsof >/dev/null 2>&1; then
-                lsof -ti :"${APP_PORT}" | xargs -r kill -9 || true
+              echo "Freeing port ${APP_PORT} if safe..."
+              # Try not to kill unrelated system services; only attempt if lsof exists
+              if command -v lsof >/dev/null 2>&1; then
+                PIDS="$(lsof -ti :"${APP_PORT}" 2>/dev/null | tr '\\n' ' ')"
+                if [ -n "${PIDS}" ]; then
+                  kill -9 ${PIDS} >/dev/null 2>&1 || true
+                fi
               fi
 
               mkdir -p "${LOG_DIR}"
@@ -166,15 +188,16 @@ pipeline {
             sh '''
               set -euxo pipefail
 
-              echo "Freeing port ${APP_PORT}..."
-              if command -v fuser >/dev/null 2>&1; then
-                fuser -k "${APP_PORT}/tcp" || true
-              elif command -v lsof >/dev/null 2>&1; then
-                lsof -ti :"${APP_PORT}" | xargs -r kill -9 || true
+              echo "Freeing port ${APP_PORT} if safe..."
+              if command -v lsof >/dev/null 2>&1; then
+                PIDS="$(lsof -ti :"${APP_PORT}" 2>/dev/null | tr '\\n' ' ')"
+                if [ -n "${PIDS}" ]; then
+                  kill -9 ${PIDS} >/dev/null 2>&1 || true
+                fi
               fi
 
               mkdir -p "${LOG_DIR}"
-              JAR_FILE=$(ls -1 target/*.jar | head -n1)
+              JAR_FILE=$(ls -1 target/*.jar 2>/dev/null | head -n1 || true)
               [ -f "$JAR_FILE" ] || { echo "JAR not found in target/"; exit 1; }
               nohup java -jar "$JAR_FILE" --server.port="${APP_PORT}" > "${LOG_DIR}/app.out" 2> "${LOG_DIR}/app.err" &
               echo $! > "${PID_FILE}"
