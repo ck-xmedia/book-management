@@ -124,6 +124,22 @@ pipeline {
     stage('Deploy Application') {
       steps {
         script {
+          // Reconfirm project type at deploy-time to avoid "unknown"
+          if (!env.PROJECT_TYPE || env.PROJECT_TYPE.trim() == '' || env.PROJECT_TYPE == 'unknown') {
+            if (fileExists('requirements.txt')) {
+              env.PROJECT_TYPE = 'python'
+            } else if (fileExists('package.json')) {
+              env.PROJECT_TYPE = 'node'
+            } else if (fileExists('pom.xml')) {
+              env.PROJECT_TYPE = 'maven'
+            } else if (fileExists('build.gradle') || fileExists('build.gradle.kts')) {
+              env.PROJECT_TYPE = 'gradle'
+            } else {
+              env.PROJECT_TYPE = 'unknown'
+            }
+            echo "Deploy-time project type: ${env.PROJECT_TYPE}"
+          }
+
           sh '''
             set +e
             PORT="$APP_PORT"
@@ -188,7 +204,24 @@ pipeline {
               sleep 5
             '''
           } else {
-            error('Deployment not implemented for detected project type.')
+            // Safe default for this repository: try python if requirements.txt exists
+            if (fileExists('requirements.txt')) {
+              echo 'Unknown project type at deploy-time; defaulting to python.'
+              sh '''
+                set -eux
+                : > "$LOG_FILE"
+                nohup "$VENV_DIR/bin/uvicorn" "$APP_ENTRY" --host 0.0.0.0 --port "$APP_PORT" --workers 1 >> "$LOG_FILE" 2>&1 &
+                echo $! > "$PID_FILE"
+                sleep 3
+                if ! kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+                  echo "Application failed to start. Tail of log:"
+                  tail -n 200 "$LOG_FILE" || true
+                  exit 1
+                fi
+              '''
+            } else {
+              error('Deployment not implemented for detected project type.')
+            }
           }
           sh '''
             set +e
