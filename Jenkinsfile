@@ -140,31 +140,76 @@ pipeline {
             echo "Deploy-time project type: ${env.PROJECT_TYPE}"
           }
 
+          // Ensure the target port is fully free before starting
           sh '''
             set +e
             PORT="$APP_PORT"
+
             PIDS=""
             if command -v lsof >/dev/null 2>&1; then
-              PIDS=$(lsof -ti :"$PORT")
-            elif command -v fuser >/dev/null 2>&1; then
-              PIDS=$(fuser -n tcp "$PORT" 2>/dev/null)
-            else
-              PIDS=$(netstat -tulnp 2>/dev/null | awk -v p=":$PORT" '$4 ~ p {split($7,a,"/"); print a[1]}' | tr -d " ")
+              PIDS="$(lsof -t -iTCP -sTCP:LISTEN -i :"$PORT" 2>/dev/null | tr '\\n' ' ')"
             fi
+            if [ -z "$PIDS" ] && command -v ss >/dev/null 2>&1; then
+              PIDS="$(ss -ltnp 2>/dev/null | awk -v p=":$PORT" '$4 ~ p {gsub(/pid=/,"",$7); split($7,a,","); split(a[1],b,"/"); print b[1]}' | tr '\\n' ' ')"
+            fi
+            if [ -z "$PIDS" ] && command -v fuser >/dev/null 2>&1; then
+              PIDS="$(fuser -n tcp "$PORT" 2>/dev/null)"
+            fi
+            if [ -z "$PIDS" ] && command -v netstat >/dev/null 2>&1; then
+              PIDS="$(netstat -tulnp 2>/dev/null | awk -v p=":$PORT" '$4 ~ p {split($7,a,"/"); print a[1]}' | tr -d " ")"
+            fi
+
             if [ -n "$PIDS" ]; then
               echo "Killing processes on port $PORT: $PIDS"
-              kill -9 $PIDS || true
+              kill -9 $PIDS 2>/dev/null || true
             fi
+
+            if command -v fuser >/dev/null 2>&1; then
+              fuser -k -n tcp "$PORT" 2>/dev/null || true
+            fi
+
+            # Kill any lingering uvicorn bound to this port (best-effort)
+            if command -v pkill >/dev/null 2>&1; then
+              pkill -f "uvicorn.*--port[= ]*$PORT" 2>/dev/null || true
+            fi
+
+            # Also handle previous PID file if present
             if [ -f "$PID_FILE" ]; then
-              OLD_PID=$(cat "$PID_FILE" || true)
+              OLD_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
               if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
                 echo "Killing previous app PID $OLD_PID"
-                kill -9 "$OLD_PID" || true
+                kill "$OLD_PID" 2>/dev/null || true
+                sleep 1
+                kill -9 "$OLD_PID" 2>/dev/null || true
               fi
-              rm -f "$PID_FILE"
+              rm -f "$PID_FILE" 2>/dev/null || true
+            fi
+
+            # Wait until port is confirmed free (max ~10s)
+            i=0
+            while [ $i -lt 10 ]; do
+              FREE=1
+              if command -v lsof >/dev/null 2>&1; then
+                lsof -iTCP -sTCP:LISTEN -i :"$PORT" >/dev/null 2>&1 && FREE=0
+              elif command -v ss >/dev/null 2>&1; then
+                ss -ltnp 2>/dev/null | awk -v p=":$PORT" '$4 ~ p {exit 1}'; [ $? -eq 0 ] || FREE=0
+              elif command -v fuser >/dev/null 2>&1; then
+                fuser -n tcp "$PORT" >/dev/null 2>&1 && FREE=0
+              elif command -v netstat >/dev/null 2>&1; then
+                netstat -tulnp 2>/dev/null | awk -v p=":$PORT" '$4 ~ p {found=1} END {exit found?1:0}'; [ $? -eq 0 ] || FREE=0
+              fi
+              [ $FREE -eq 1 ] && break
+              i=$((i+1))
+              sleep 1
+            done
+
+            if [ $FREE -ne 1 ]; then
+              echo "Failed to free port $PORT after waiting; aborting."
+              exit 1
             fi
             set -e
           '''
+
           if (env.PROJECT_TYPE == 'python') {
             sh '''
               set -eux
@@ -253,8 +298,32 @@ pipeline {
         echo "APP_PORT=$APP_PORT" >> deploy.env
         echo "VENV_DIR=$VENV_DIR" >> deploy.env
         tail -n 200 "$LOG_FILE" > app.tail.log 2>/dev/null || true
+        set -e
       '''
       archiveArtifacts artifacts: 'app.log, app.tail.log, deploy.env', onlyIfSuccessful: false, allowEmptyArchive: true
+
+      // Best-effort cleanup to avoid leaving port in use for next run
+      sh '''
+        set +e
+        if [ -f "$PID_FILE" ]; then
+          PID="$(cat "$PID_FILE" 2>/dev/null || true)"
+          if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+            echo "Stopping app PID $PID"
+            kill "$PID" 2>/dev/null || true
+            sleep 1
+            kill -9 "$PID" 2>/dev/null || true
+          fi
+        fi
+        PORT="$APP_PORT"
+        if command -v fuser >/dev/null 2>&1; then
+          fuser -k -n tcp "$PORT" 2>/dev/null || true
+        fi
+        if command -v lsof >/dev/null 2>&1; then
+          P="$(lsof -t -iTCP -sTCP:LISTEN -i :"$PORT" 2>/dev/null | tr '\\n' ' ')"
+          [ -n "$P" ] && kill -9 $P 2>/dev/null || true
+        fi
+        set -e
+      '''
     }
     failure {
       echo "Build failed. Check archived logs."
