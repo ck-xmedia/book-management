@@ -91,13 +91,19 @@ pipeline {
               fi
 
               echo "Freeing port ${APP_PORT}..."
-              if command -v fuser >/dev/null 2>&1; then
+              if command -v ss >/dev/null 2>&1; then
+                PIDS="$(ss -ltnp 2>/dev/null | grep -E '[:\\.]'"${APP_PORT}"'\\b' | sed -n 's/.*pid=\\([0-9]\\+\\).*/\\1/p' | sort -u | tr '\\n' ' ')"
+                [ -n "${PIDS}" ] && kill -9 ${PIDS} || true
+              elif command -v fuser >/dev/null 2>&1; then
                 fuser -k "${APP_PORT}/tcp" || true
               elif command -v lsof >/dev/null 2>&1; then
                 lsof -ti :"${APP_PORT}" | xargs -r kill -9 || true
               elif command -v netstat >/dev/null 2>&1; then
-                PID=$(netstat -tulpn 2>/dev/null | awk '/:'"${APP_PORT}"'\\s/ {print $7}' | cut -d/ -f1 | head -n1); [ -n "$PID" ] && kill -9 "$PID" || true
+                PID=$(netstat -tulpn 2>/dev/null | awk '/:'"${APP_PORT}"'\\b/ {print $7}' | cut -d/ -f1 | head -n1); [ -n "$PID" ] && kill -9 "$PID" || true
+              else
+                pkill -f "uvicorn.*${APP_PORT}" || true
               fi
+              sleep 1
 
               echo "Starting FastAPI (uvicorn) in background on port ${APP_PORT}..."
               mkdir -p "${LOG_DIR}"
