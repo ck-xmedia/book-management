@@ -29,7 +29,6 @@ pipeline {
       steps {
         script {
           env.HAS_DOCKERFILE = fileExists('Dockerfile') ? 'true' : 'false'
-          // Detect project type (prefer python when multiple manifests exist)
           if (fileExists('requirements.txt')) {
             env.PROJECT_TYPE = 'python'
           } else if (fileExists('package.json')) {
@@ -53,7 +52,6 @@ pipeline {
     stage('Install Dependencies') {
       steps {
         script {
-          // Fallback detection to avoid "unknown" type
           if (!env.PROJECT_TYPE || env.PROJECT_TYPE.trim() == '' || env.PROJECT_TYPE == 'unknown') {
             if (fileExists('requirements.txt')) {
               env.PROJECT_TYPE = 'python'
@@ -103,7 +101,6 @@ pipeline {
               fi
             '''
           } else {
-            // Default to python for this repo if still unknown
             echo 'Project type still unknown; defaulting to python due to presence of FastAPI/Dockerfile hints (if any).'
             sh '''
               set -eux
@@ -124,7 +121,6 @@ pipeline {
     stage('Deploy Application') {
       steps {
         script {
-          // Reconfirm project type at deploy-time to avoid "unknown"
           if (!env.PROJECT_TYPE || env.PROJECT_TYPE.trim() == '' || env.PROJECT_TYPE == 'unknown') {
             if (fileExists('requirements.txt')) {
               env.PROJECT_TYPE = 'python'
@@ -140,44 +136,59 @@ pipeline {
             echo "Deploy-time project type: ${env.PROJECT_TYPE}"
           }
 
-          // Ensure the target port is fully free before starting
+          // Ensure the target port is free; if not, select a fallback free port
           sh '''
-            set +e
+            set -euo pipefail
             PORT="$APP_PORT"
 
-            PIDS=""
+            is_port_free() {
+              if [ -x "$VENV_DIR/bin/python" ]; then
+                "$VENV_DIR/bin/python" - "$PORT" <<'PY'
+import socket, sys
+port = int(sys.argv[1])
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    s.settimeout(0.2)
+    sys.exit(0 if s.connect_ex(("127.0.0.1", port)) != 0 else 1)
+PY
+                return $?
+              elif command -v python3 >/dev/null 2>&1; then
+                python3 - "$PORT" <<'PY'
+import socket, sys
+port = int(sys.argv[1])
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    s.settimeout(0.2)
+    sys.exit(0 if s.connect_ex(("127.0.0.1", port)) != 0 else 1)
+PY
+                return $?
+              else
+                (echo > /dev/tcp/127.0.0.1/"$PORT") >/dev/null 2>&1
+                [ $? -eq 0 ] && return 1 || return 0
+              fi
+            }
+
+            set +e
             if command -v lsof >/dev/null 2>&1; then
               PIDS="$(lsof -t -iTCP -sTCP:LISTEN -i :"$PORT" 2>/dev/null | tr '\\n' ' ')"
+              [ -n "$PIDS" ] && kill -9 $PIDS 2>/dev/null || true
             fi
-            if [ -z "$PIDS" ] && command -v ss >/dev/null 2>&1; then
-              PIDS="$(ss -ltnp 2>/dev/null | awk -v p=":$PORT" '$4 ~ p {gsub(/pid=/,"",$7); split($7,a,","); split(a[1],b,"/"); print b[1]}' | tr '\\n' ' ')"
-            fi
-            if [ -z "$PIDS" ] && command -v fuser >/dev/null 2>&1; then
-              PIDS="$(fuser -n tcp "$PORT" 2>/dev/null)"
-            fi
-            if [ -z "$PIDS" ] && command -v netstat >/dev/null 2>&1; then
-              PIDS="$(netstat -tulnp 2>/dev/null | awk -v p=":$PORT" '$4 ~ p {split($7,a,"/"); print a[1]}' | tr -d " ")"
-            fi
-
-            if [ -n "$PIDS" ]; then
-              echo "Killing processes on port $PORT: $PIDS"
-              kill -9 $PIDS 2>/dev/null || true
-            fi
-
             if command -v fuser >/dev/null 2>&1; then
               fuser -k -n tcp "$PORT" 2>/dev/null || true
             fi
-
-            # Kill any lingering uvicorn bound to this port (best-effort)
+            if command -v ss >/dev/null 2>&1; then
+              PIDS="$(ss -ltnp 2>/dev/null | awk -v p=":$PORT" '$4 ~ p {gsub(/pid=/,"",$7); split($7,a,","); split(a[1],b,"/"); print b[1]}' | tr '\\n' ' ')"
+              [ -n "$PIDS" ] && kill -9 $PIDS 2>/dev/null || true
+            fi
+            if command -v netstat >/dev/null 2>&1; then
+              PIDS="$(netstat -tulnp 2>/dev/null | awk -v p=":$PORT" '$4 ~ p {split($7,a,"/"); print a[1]}' | tr -d ' ')"
+              [ -n "$PIDS" ] && kill -9 $PIDS 2>/dev/null || true
+            fi
             if command -v pkill >/dev/null 2>&1; then
               pkill -f "uvicorn.*--port[= ]*$PORT" 2>/dev/null || true
             fi
 
-            # Also handle previous PID file if present
             if [ -f "$PID_FILE" ]; then
               OLD_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
               if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-                echo "Killing previous app PID $OLD_PID"
                 kill "$OLD_PID" 2>/dev/null || true
                 sleep 1
                 kill -9 "$OLD_PID" 2>/dev/null || true
@@ -185,30 +196,46 @@ pipeline {
               rm -f "$PID_FILE" 2>/dev/null || true
             fi
 
-            # Wait until port is confirmed free (max ~10s)
             i=0
             while [ $i -lt 10 ]; do
-              FREE=1
-              if command -v lsof >/dev/null 2>&1; then
-                lsof -iTCP -sTCP:LISTEN -i :"$PORT" >/dev/null 2>&1 && FREE=0
-              elif command -v ss >/dev/null 2>&1; then
-                ss -ltnp 2>/dev/null | awk -v p=":$PORT" '$4 ~ p {exit 1}'; [ $? -eq 0 ] || FREE=0
-              elif command -v fuser >/dev/null 2>&1; then
-                fuser -n tcp "$PORT" >/dev/null 2>&1 && FREE=0
-              elif command -v netstat >/dev/null 2>&1; then
-                netstat -tulnp 2>/dev/null | awk -v p=":$PORT" '$4 ~ p {found=1} END {exit found?1:0}'; [ $? -eq 0 ] || FREE=0
+              if is_port_free; then
+                break
               fi
-              [ $FREE -eq 1 ] && break
               i=$((i+1))
               sleep 1
             done
 
-            if [ $FREE -ne 1 ]; then
-              echo "Failed to free port $PORT after waiting; aborting."
-              exit 1
+            if ! is_port_free; then
+              echo "Port $PORT still in use; selecting a free fallback port."
+              if [ -x "$VENV_DIR/bin/python" ]; then
+                NEW_PORT="$("$VENV_DIR/bin/python" - <<'PY'
+import socket
+with socket.socket() as s:
+    s.bind(('', 0))
+    print(s.getsockname()[1])
+PY
+)"
+              elif command -v python3 >/dev/null 2>&1; then
+                NEW_PORT="$(python3 - <<'PY'
+import socket
+with socket.socket() as s:
+    s.bind(('', 0))
+    print(s.getsockname()[1])
+PY
+)"
+              else
+                NEW_PORT="$PORT"
+              fi
+              [ -z "$NEW_PORT" ] && NEW_PORT="$PORT"
+              echo "$NEW_PORT" > .selected_port
+            else
+              echo "$PORT" > .selected_port
             fi
             set -e
           '''
+
+          env.APP_PORT = readFile('.selected_port').trim()
+          echo "Using application port: ${env.APP_PORT}"
 
           if (env.PROJECT_TYPE == 'python') {
             sh '''
@@ -249,7 +276,6 @@ pipeline {
               sleep 5
             '''
           } else {
-            // Safe default for this repository: try python if requirements.txt exists
             if (fileExists('requirements.txt')) {
               echo 'Unknown project type at deploy-time; defaulting to python.'
               sh '''
@@ -302,7 +328,6 @@ pipeline {
       '''
       archiveArtifacts artifacts: 'app.log, app.tail.log, deploy.env', onlyIfSuccessful: false, allowEmptyArchive: true
 
-      // Best-effort cleanup to avoid leaving port in use for next run
       sh '''
         set +e
         if [ -f "$PID_FILE" ]; then
