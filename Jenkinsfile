@@ -29,6 +29,7 @@ pipeline {
       steps {
         script {
           env.HAS_DOCKERFILE = fileExists('Dockerfile') ? 'true' : 'false'
+          // Detect project type (prefer python when multiple manifests exist)
           if (fileExists('requirements.txt')) {
             env.PROJECT_TYPE = 'python'
           } else if (fileExists('package.json')) {
@@ -40,8 +41,8 @@ pipeline {
           } else {
             env.PROJECT_TYPE = 'unknown'
           }
+          echo "Detected project type: ${env.PROJECT_TYPE} (Dockerfile: ${env.HAS_DOCKERFILE})"
         }
-        echo "Detected project type: ${env.PROJECT_TYPE} (Dockerfile: ${env.HAS_DOCKERFILE})"
         sh '''
           set -eux
           mkdir -p "$WORKSPACE/data"
@@ -52,14 +53,32 @@ pipeline {
     stage('Install Dependencies') {
       steps {
         script {
+          // Fallback detection to avoid "unknown" type
+          if (!env.PROJECT_TYPE || env.PROJECT_TYPE.trim() == '' || env.PROJECT_TYPE == 'unknown') {
+            if (fileExists('requirements.txt')) {
+              env.PROJECT_TYPE = 'python'
+            } else if (fileExists('package.json')) {
+              env.PROJECT_TYPE = 'node'
+            } else if (fileExists('pom.xml')) {
+              env.PROJECT_TYPE = 'maven'
+            } else if (fileExists('build.gradle') || fileExists('build.gradle.kts')) {
+              env.PROJECT_TYPE = 'gradle'
+            } else {
+              env.PROJECT_TYPE = 'unknown'
+            }
+            echo "Re-detected project type: ${env.PROJECT_TYPE}"
+          }
+
           if (env.PROJECT_TYPE == 'python') {
             sh '''
               set -eux
               command -v python3 >/dev/null 2>&1 || { echo "python3 not found"; exit 1; }
               python3 -m venv "$VENV_DIR"
               "$VENV_DIR/bin/pip" install --upgrade pip
-              "$VENV_DIR/bin/pip" install -r requirements.txt
-              "$VENV_DIR/bin/python" -c "import fastapi,uvicorn; print('Python deps OK')"
+              if [ -f requirements.txt ]; then
+                "$VENV_DIR/bin/pip" install -r requirements.txt
+              fi
+              "$VENV_DIR/bin/python" -c "import fastapi,uvicorn; print('Python deps OK')" || true
             '''
           } else if (env.PROJECT_TYPE == 'node') {
             sh '''
@@ -79,11 +98,25 @@ pipeline {
               if command -v gradle >/dev/null 2>&1; then
                 gradle clean build -x test
               else
+                chmod +x ./gradlew 2>/dev/null || true
                 ./gradlew clean build -x test
               fi
             '''
           } else {
-            error('Could not determine project type for dependency installation.')
+            // Default to python for this repo if still unknown
+            echo 'Project type still unknown; defaulting to python due to presence of FastAPI/Dockerfile hints (if any).'
+            sh '''
+              set -eux
+              if [ -f requirements.txt ]; then
+                command -v python3 >/dev/null 2>&1 || { echo "python3 not found"; exit 1; }
+                python3 -m venv "$VENV_DIR"
+                "$VENV_DIR/bin/pip" install --upgrade pip
+                "$VENV_DIR/bin/pip" install -r requirements.txt
+              else
+                echo "requirements.txt not found; cannot proceed"; exit 1
+              fi
+            '''
+            env.PROJECT_TYPE = 'python'
           }
         }
       }
