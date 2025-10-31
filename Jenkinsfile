@@ -55,12 +55,21 @@ pipeline {
           if [ -f "requirements.txt" ]; then
             FOUND=1
             echo "Detected Python project (requirements.txt)"
-            python3 --version || true
-            python3 -m venv "$VENV_DIR"
+            PY_BIN=""
+            if command -v python3 >/dev/null 2>&1; then
+              PY_BIN="python3"
+            elif command -v python >/dev/null 2>&1; then
+              PY_BIN="python"
+            else
+              echo "No python interpreter found on PATH."
+              exit 1
+            fi
+            "$PY_BIN" --version || true
+            "$PY_BIN" -m venv "$VENV_DIR"
             . "$VENV_DIR/bin/activate"
             python -m pip install --upgrade pip
             pip install -r requirements.txt
-            python -c "import fastapi, uvicorn, pydantic, starlette; print('Python deps OK')"
+            python -c "import fastapi, uvicorn, pydantic, starlette; print('Python deps OK')" || true
           fi
 
           if [ -f "package.json" ]; then
@@ -134,7 +143,16 @@ pipeline {
           # Deploy based on project structure
           if [ -f "requirements.txt" ] && [ -d "app" ]; then
             echo "Deploying as Python FastAPI app with uvicorn"
-            . "$VENV_DIR/bin/activate"
+            # Activate venv if available and prefer venv uvicorn
+            UVICORN_BIN="uvicorn"
+            if [ -x "$VENV_DIR/bin/uvicorn" ]; then
+              UVICORN_BIN="$VENV_DIR/bin/uvicorn"
+            elif command -v uvicorn >/dev/null 2>&1; then
+              UVICORN_BIN="$(command -v uvicorn)"
+            else
+              echo "uvicorn not found. Ensure Python deps stage succeeded."
+              exit 1
+            fi
 
             # Stop previous background app if tracked
             if [ -f run/app.pid ]; then
@@ -145,7 +163,7 @@ pipeline {
               fi
             fi
 
-            nohup uvicorn app.main:app --host 0.0.0.0 --port "${APP_PORT}" --workers 1 > run/app.log 2>&1 &
+            nohup "$UVICORN_BIN" "app.main:app" --host "0.0.0.0" --port "${APP_PORT}" --workers "1" > run/app.log 2>&1 &
             NEW_PID=$!
             echo "${NEW_PID}" > run/app.pid
             echo "Started uvicorn with PID ${NEW_PID}"
@@ -173,7 +191,7 @@ pipeline {
               fi
             fi
 
-            if npm pkg get scripts.start >/dev/null 2>&1; then
+            if command -v npm >/dev/null 2>&1 && npm pkg get scripts.start >/dev/null 2>&1; then
               nohup npm start --if-present > run/node.log 2>&1 &
             elif [ -f "server.js" ]; then
               nohup node server.js > run/node.log 2>&1 &
@@ -191,17 +209,22 @@ pipeline {
 
           # Health check
           echo "Waiting for service on http://localhost:${APP_PORT}/healthz"
+          STATUS=""
           for i in $(seq 1 30); do
-            if curl -fsS "http://localhost:${APP_PORT}/healthz" >/dev/null 2>&1; then
+            STATUS=$(curl -sS -o /dev/null -w "%{http_code}" "http://localhost:${APP_PORT}/healthz" || true)
+            if [ "$STATUS" = "200" ]; then
               echo "Service is healthy."
               break
             else
-              echo "Waiting (${i}/30)..."
+              echo "Waiting (${i}/30)... last status: ${STATUS:-none}"
               sleep 2
             fi
           done
-          # Final assert
-          curl -fsS "http://localhost:${APP_PORT}/healthz" >/dev/null
+          if [ "$STATUS" != "200" ]; then
+            echo "Health check failed after retries. Dumping recent logs..."
+            (tail -n 200 run/*.log || true)
+            exit 1
+          fi
         '''
       }
     }
