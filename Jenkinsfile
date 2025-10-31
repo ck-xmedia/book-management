@@ -41,7 +41,7 @@ pipeline {
             env.PROJECT_TYPE = 'unknown'
           }
         }
-        echo "Detected project type: ${PROJECT_TYPE} (Dockerfile: ${HAS_DOCKERFILE})"
+        echo "Detected project type: ${env.PROJECT_TYPE} (Dockerfile: ${env.HAS_DOCKERFILE})"
         sh '''
           set -eux
           mkdir -p "$WORKSPACE/data"
@@ -194,7 +194,7 @@ pipeline {
       echo "Build failed. Check archived logs."
     }
     success {
-      echo "Deployment successful on port ${APP_PORT}"
+      echo "Deployment successful on port ${env.APP_PORT}"
     }
   }
 }
