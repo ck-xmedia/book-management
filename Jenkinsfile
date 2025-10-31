@@ -115,19 +115,21 @@ pipeline {
           set -euxo pipefail
           mkdir -p run
 
-          echo "Stopping any process or container on port ${APP_PORT}"
+          EFFECTIVE_PORT="${APP_PORT}"
 
-          # Kill processes on port
+          echo "Stopping any process or container on port ${APP_PORT} (if safe)."
+
+          # Kill processes on port (best effort)
           if command -v lsof >/dev/null 2>&1; then
             PIDS=$(lsof -ti tcp:${APP_PORT} || true)
           else
             PIDS=$(fuser -n tcp ${APP_PORT} 2>/dev/null || true)
           fi
           if [ -n "${PIDS:-}" ]; then
-            echo "Killing PIDs: ${PIDS}"
+            echo "Attempting to kill PIDs bound to ${APP_PORT}: ${PIDS}"
             kill -9 ${PIDS} || true
           else
-            echo "No local processes bound to ${APP_PORT}"
+            echo "No local processes found bound to ${APP_PORT}"
           fi
 
           # Stop docker containers publishing the port
@@ -138,6 +140,48 @@ pipeline {
               docker stop ${CONTAINERS_BY_PORT} || true
               docker rm ${CONTAINERS_BY_PORT} || true
             fi
+          fi
+
+          # If port still appears used by another service (e.g., Jenkins), pick a free port
+          if command -v curl >/dev/null 2>&1; then
+            STATUS_PRE=$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${EFFECTIVE_PORT}/healthz" || true)
+          else
+            STATUS_PRE=""
+          fi
+          if [ -n "${STATUS_PRE}" ] && [ "${STATUS_PRE}" != "000" ]; then
+            echo "Port ${EFFECTIVE_PORT} appears in use (HTTP ${STATUS_PRE}). Selecting alternate port."
+            PY_BIN=""
+            if [ -x "$VENV_DIR/bin/python" ]; then
+              PY_BIN="$VENV_DIR/bin/python"
+            elif command -v python3 >/dev/null 2>&1; then
+              PY_BIN="python3"
+            elif command -v python >/dev/null 2>&1; then
+              PY_BIN="python"
+            fi
+            if [ -n "${PY_BIN}" ]; then
+              ALT_PORT="$("$PY_BIN" - <<'PY'
+import socket
+with socket.socket() as s:
+    s.bind(("127.0.0.1", 0))
+    print(s.getsockname()[1])
+PY
+)"
+              if [ -n "${ALT_PORT}" ]; then
+                EFFECTIVE_PORT="${ALT_PORT}"
+              else
+                EFFECTIVE_PORT="18080"
+              fi
+            else
+              EFFECTIVE_PORT="18080"
+            fi
+            echo "Using EFFECTIVE_PORT=${EFFECTIVE_PORT}"
+          fi
+
+          # Ensure .env reflects EFFECTIVE_PORT
+          if grep -q '^PORT=' .env; then
+            sed -i "s/^PORT=.*/PORT=${EFFECTIVE_PORT}/" .env
+          else
+            echo "PORT=${EFFECTIVE_PORT}" >> .env
           fi
 
           # Deploy based on project structure
@@ -163,19 +207,19 @@ pipeline {
               fi
             fi
 
-            nohup "$UVICORN_BIN" "app.main:app" --host "0.0.0.0" --port "${APP_PORT}" --workers "1" > run/app.log 2>&1 &
+            nohup "$UVICORN_BIN" "app.main:app" --host "0.0.0.0" --port "${EFFECTIVE_PORT}" --workers "1" > run/app.log 2>&1 &
             NEW_PID=$!
             echo "${NEW_PID}" > run/app.pid
-            echo "Started uvicorn with PID ${NEW_PID}"
+            echo "Started uvicorn with PID ${NEW_PID} on port ${EFFECTIVE_PORT}"
 
           elif [ -f "Dockerfile" ]; then
             echo "Deploying using Docker image build/run"
             if command -v docker >/dev/null 2>&1; then
               docker build -t "${DOCKER_IMAGE_NAME}" .
               # Use nohup for background and logging
-              nohup bash -c "docker run --rm --env-file .env -p ${APP_PORT}:${APP_PORT} -v ${DATA_DIR}:/app/data ${DOCKER_IMAGE_NAME}" > run/docker.log 2>&1 &
+              nohup bash -c "docker run --rm --env-file .env -p ${EFFECTIVE_PORT}:8080 -v ${DATA_DIR}:/app/data ${DOCKER_IMAGE_NAME}" > run/docker.log 2>&1 &
               echo $! > run/docker.pid
-              echo "Started dockerized app. PID $(cat run/docker.pid)"
+              echo "Started dockerized app. PID $(cat run/docker.pid) on port ${EFFECTIVE_PORT}"
             else
               echo "Docker not available. Cannot deploy via Docker."
               exit 1
@@ -207,11 +251,11 @@ pipeline {
             exit 1
           fi
 
-          # Health check
-          echo "Waiting for service on http://localhost:${APP_PORT}/healthz"
+          # Health check (use 127.0.0.1 explicitly to avoid proxy issues)
+          echo "Waiting for service on http://127.0.0.1:${EFFECTIVE_PORT}/healthz"
           STATUS=""
           for i in $(seq 1 30); do
-            STATUS=$(curl -sS -o /dev/null -w "%{http_code}" "http://localhost:${APP_PORT}/healthz" || true)
+            STATUS=$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${EFFECTIVE_PORT}/healthz" || true)
             if [ "$STATUS" = "200" ]; then
               echo "Service is healthy."
               break
